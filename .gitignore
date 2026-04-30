@@ -1,7 +1,35 @@
+# R
 .Rproj.user
 .Rhistory
 .RData
 .Ruserdata
 .positai
-Steam-Sentiment-Analysis-main
 .Rprofile
+
+# Python virtual environment
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# renv (packages restored from renv.lock)
+renv/library/
+renv/local/
+renv/cellar/
+renv/staging/
+renv/python/
+
+# Project outputs (regeneratable from master_data.csv)
+*.xlsx
+*.tmp
+master_data.csv.tmp
+~$*
+
+# Reference projects
+Steam-Sentiment-Analysis-main
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
