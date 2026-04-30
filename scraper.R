@@ -1,3 +1,5 @@
+library(reticulate)
+
 source_python("scraper.py")
 
 # Scrape pages 1 through 5, skip listings already in master
