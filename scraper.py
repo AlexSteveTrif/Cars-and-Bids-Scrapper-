@@ -28,12 +28,17 @@ from datetime import datetime
 import pandas as pd
 from bs4 import BeautifulSoup
 import undetected_chromedriver as uc
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException
 
 BASE_URL = "https://carsandbids.com"
 CHROME_VERSION = 147
 REQUEST_DELAY = 3
-PAGE_LOAD_WAIT = 5
-DETAIL_LOAD_WAIT = 4
+LIST_PAGE_TIMEOUT = 45     # max seconds to wait for listing cards to appear
+DETAIL_PAGE_TIMEOUT = 30   # max seconds to wait for detail-page content
+LIST_PAGE_RETRIES = 3      # retry empty list pages this many times
 
 COLUMN_ORDER = [
     'auction_id', 'url', 'title',
@@ -198,9 +203,21 @@ def _extract_title(soup):
     return None
 
 
+def _wait_for(driver, css_selector, timeout):
+    """Wait until at least one element matching css_selector is present. Returns True/False."""
+    try:
+        WebDriverWait(driver, timeout).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, css_selector))
+        )
+        return True
+    except TimeoutException:
+        return False
+
+
 def _extract_listing(driver, url):
     driver.get(url)
-    time.sleep(DETAIL_LOAD_WAIT)
+    _wait_for(driver, 'div.cnb-details-quick-facts', DETAIL_PAGE_TIMEOUT)
+    time.sleep(1)  # brief settle for any post-render JS
     soup = BeautifulSoup(driver.page_source, 'lxml')
 
     specs = _extract_specs(soup)
@@ -242,17 +259,31 @@ def _extract_listing(driver, url):
 
 
 def _get_listing_urls(driver, page):
-    driver.get(f"{BASE_URL}/past-auctions/?page={page}")
-    time.sleep(PAGE_LOAD_WAIT)
-    _scroll_to_load_all(driver)
-    soup = BeautifulSoup(driver.page_source, 'lxml')
-    cards = soup.select('ul.auctions-list li.auction-item')
-    urls = []
-    for card in cards:
-        a = card.select_one('a.hero')
-        if a and a.get('href'):
-            urls.append(BASE_URL + a['href'])
-    return urls
+    """
+    Load a past-auctions page and return all listing URLs.
+    Retries up to LIST_PAGE_RETRIES times if the page renders empty —
+    deeper pages can take longer to populate.
+    """
+    for attempt in range(1, LIST_PAGE_RETRIES + 1):
+        driver.get(f"{BASE_URL}/past-auctions/?page={page}")
+
+        appeared = _wait_for(driver, 'ul.auctions-list li.auction-item', LIST_PAGE_TIMEOUT)
+        if appeared:
+            _scroll_to_load_all(driver)
+            soup = BeautifulSoup(driver.page_source, 'lxml')
+            cards = soup.select('ul.auctions-list li.auction-item')
+            urls = []
+            for card in cards:
+                a = card.select_one('a.hero')
+                if a and a.get('href'):
+                    urls.append(BASE_URL + a['href'])
+            if urls:
+                return urls
+
+        print(f"  Attempt {attempt}/{LIST_PAGE_RETRIES}: no cards rendered, retrying...")
+        time.sleep(5 * attempt)  # progressive backoff: 5s, 10s, 15s
+
+    return []
 
 
 # ---------------------------------------------------------------------------
