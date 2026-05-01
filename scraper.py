@@ -146,6 +146,10 @@ def _extract_specs(soup):
     if not dl:
         return specs
     for dt, dd in zip(dl.find_all('dt'), dl.find_all('dd')):
+        # Strip out subscribe buttons and screen-reader-only text
+        # (otherwise "Save" / "Notify me" hint text leaks into values like model)
+        for el in dd.select('button, .sr-only'):
+            el.decompose()
         specs[dt.get_text(strip=True)] = dd.get_text(strip=True)
     return specs
 
