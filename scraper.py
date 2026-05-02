@@ -36,9 +36,9 @@ from selenium.common.exceptions import TimeoutException
 BASE_URL = "https://carsandbids.com"
 CHROME_VERSION = 147
 REQUEST_DELAY = 4
-LIST_PAGE_TIMEOUT = 120     # max seconds to wait for listing cards to appear
-DETAIL_PAGE_TIMEOUT = 120   # max seconds to wait for detail-page content
-LIST_PAGE_RETRIES = 10      # retry empty list pages this many times
+LIST_PAGE_TIMEOUT = 300     # max seconds to wait for listing cards to appear
+DETAIL_PAGE_TIMEOUT = 300   # max seconds to wait for detail-page content
+LIST_PAGE_RETRIES = 30      # retry empty list pages this many times
 
 COLUMN_ORDER = [
     'auction_id', 'url', 'title',
