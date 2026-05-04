@@ -13,17 +13,22 @@ Key features
 - Splits Location into city / state / postal_code
 - Deduplicates against an existing master CSV
 - Saves after every page (atomic write — safe against crashes)
+- Tracks last completed page in scraper_progress.json
+- All timestamps reported in Mountain Time (America/Edmonton)
 - Optional Excel snapshot export
 
 Public API
 ----------
 scrape_pages(start_page, end_page, master_path, excel_path, skip_existing)
+get_resume_page(lookback, progress_path)
 """
 
+import json
 import os
 import re
 import time
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 from bs4 import BeautifulSoup
@@ -33,12 +38,16 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 
-BASE_URL = "https://carsandbids.com"
-CHROME_VERSION = 147
-REQUEST_DELAY = 4
-LIST_PAGE_TIMEOUT = 300     # max seconds to wait for listing cards to appear
-DETAIL_PAGE_TIMEOUT = 300   # max seconds to wait for detail-page content
-LIST_PAGE_RETRIES = 30      # retry empty list pages this many times
+BASE_URL          = "https://carsandbids.com"
+CHROME_VERSION    = 147
+REQUEST_DELAY     = 4
+LIST_PAGE_TIMEOUT = 300
+DETAIL_PAGE_TIMEOUT = 300
+LIST_PAGE_RETRIES = 30
+LOOKBACK_PAGES    = 5
+PROGRESS_FILE     = "scraper_progress.json"
+
+MOUNTAIN_TZ = ZoneInfo("America/Edmonton")
 
 COLUMN_ORDER = [
     'auction_id', 'url', 'title',
@@ -52,6 +61,66 @@ COLUMN_ORDER = [
     'ended_at', 'bids', 'views', 'watching',
     'scraped_at',
 ]
+
+
+# ---------------------------------------------------------------------------
+# Time helpers (Mountain Time throughout)
+# ---------------------------------------------------------------------------
+
+def _now_mst():
+    return datetime.now(tz=MOUNTAIN_TZ)
+
+
+def _fmt_time(dt=None):
+    if dt is None:
+        dt = _now_mst()
+    return dt.strftime("%b %d, %Y %I:%M:%S %p %Z")
+
+
+def _elapsed(start):
+    secs = int((_now_mst() - start).total_seconds())
+    m, s = divmod(secs, 60)
+    return f"{m}m {s}s" if m else f"{s}s"
+
+
+# ---------------------------------------------------------------------------
+# Progress checkpoint
+# ---------------------------------------------------------------------------
+
+def _load_progress(progress_path=PROGRESS_FILE):
+    if not os.path.exists(progress_path):
+        return None
+    with open(progress_path) as f:
+        return json.load(f)
+
+
+def _save_progress(page, progress_path=PROGRESS_FILE):
+    data = {
+        "last_completed_page": page,
+        "last_run_mst": _fmt_time(),
+    }
+    with open(progress_path, 'w') as f:
+        json.dump(data, f, indent=2)
+
+
+def get_resume_page(lookback=LOOKBACK_PAGES, progress_path=PROGRESS_FILE):
+    """
+    Return the recommended start page based on the last checkpoint.
+
+    Goes back `lookback` pages from the last completed page as a safety
+    buffer. Because skip_existing=True deduplicates by auction_id, those
+    overlap pages won't produce duplicate rows.
+    """
+    progress = _load_progress(progress_path)
+    if not progress:
+        print("No checkpoint found — starting from page 1.")
+        return 1
+    last = progress["last_completed_page"]
+    resume = max(1, last - lookback)
+    print(f"Checkpoint: last completed page = {last}")
+    print(f"Resuming from page {resume} ({lookback}-page lookback)")
+    print(f"Last run: {progress.get('last_run_mst', 'unknown')}\n")
+    return resume
 
 
 # ---------------------------------------------------------------------------
@@ -83,7 +152,6 @@ def _scroll_to_load_all(driver, pause=1.5):
 # ---------------------------------------------------------------------------
 
 def _auction_id_from_url(url):
-    """Extract the unique auction ID slug — the primary key."""
     m = re.search(r'/auctions/([^/]+)/', url)
     return m.group(1) if m else None
 
@@ -109,17 +177,14 @@ def _parse_mileage(text):
     if not text:
         return None, None
     text_lower = text.lower()
-
     num_match = re.search(r'[\d,]+', text)
     numeric = int(num_match.group().replace(',', '')) if num_match else None
-
     if 'exempt' in text_lower:
         tmu = None
     elif any(kw in text_lower for kw in ('tmu', 'not actual', 'miles shown')):
         tmu = True
     else:
         tmu = False
-
     return numeric, tmu
 
 
@@ -146,8 +211,6 @@ def _extract_specs(soup):
     if not dl:
         return specs
     for dt, dd in zip(dl.find_all('dt'), dl.find_all('dd')):
-        # Strip out subscribe buttons and screen-reader-only text
-        # (otherwise "Save" / "Notify me" hint text leaks into values like model)
         for el in dd.select('button, .sr-only'):
             el.decompose()
         specs[dt.get_text(strip=True)] = dd.get_text(strip=True)
@@ -175,7 +238,7 @@ def _extract_stats(soup):
         if key == 'Seller':
             seller_link = td.select_one('a.user')
             result['seller_name'] = seller_link.get_text(strip=True) if seller_link else td.get_text(strip=True)
-            dealer_tag = td.find(class_=re.compile(r'dealer', re.I))
+            dealer_tag  = td.find(class_=re.compile(r'dealer', re.I))
             dealer_text = re.search(r'\bdealer\b', td.get_text(), re.I)
             result['seller_type'] = 'Dealer' if (dealer_tag or dealer_text) else 'Private'
         else:
@@ -208,7 +271,6 @@ def _extract_title(soup):
 
 
 def _wait_for(driver, css_selector, timeout):
-    """Wait until at least one element matching css_selector is present. Returns True/False."""
     try:
         WebDriverWait(driver, timeout).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, css_selector))
@@ -221,14 +283,14 @@ def _wait_for(driver, css_selector, timeout):
 def _extract_listing(driver, url):
     driver.get(url)
     _wait_for(driver, 'div.cnb-details-quick-facts', DETAIL_PAGE_TIMEOUT)
-    time.sleep(1)  # brief settle for any post-render JS
+    time.sleep(1)
     soup = BeautifulSoup(driver.page_source, 'lxml')
 
     specs = _extract_specs(soup)
     stats = _extract_stats(soup)
 
     city, state, postal_code = _parse_location(specs.get('Location', ''))
-    mileage, mileage_tmu = _parse_mileage(specs.get('Mileage', ''))
+    mileage, mileage_tmu     = _parse_mileage(specs.get('Mileage', ''))
 
     return {
         'auction_id':     _auction_id_from_url(url),
@@ -258,34 +320,36 @@ def _extract_listing(driver, url):
         'bids':           _clean_number(stats.get('Bids')),
         'views':          _clean_number(stats.get('Views')),
         'watching':       _clean_number(stats.get('Watching')),
-        'scraped_at':     datetime.now().isoformat(timespec='seconds'),
+        'scraped_at':     _now_mst().isoformat(timespec='seconds'),
     }
 
 
 def _get_listing_urls(driver, page):
     """
     Load a past-auctions page and return all listing URLs.
-    Retries up to LIST_PAGE_RETRIES times if the page renders empty —
-    deeper pages can take longer to populate.
+    Retries up to LIST_PAGE_RETRIES times — deeper pages render more slowly.
+    Logs the time of each retry in Mountain Time.
     """
     for attempt in range(1, LIST_PAGE_RETRIES + 1):
         driver.get(f"{BASE_URL}/past-auctions/?page={page}")
-
         appeared = _wait_for(driver, 'ul.auctions-list li.auction-item', LIST_PAGE_TIMEOUT)
+
         if appeared:
             _scroll_to_load_all(driver)
-            soup = BeautifulSoup(driver.page_source, 'lxml')
+            soup  = BeautifulSoup(driver.page_source, 'lxml')
             cards = soup.select('ul.auctions-list li.auction-item')
-            urls = []
-            for card in cards:
-                a = card.select_one('a.hero')
-                if a and a.get('href'):
-                    urls.append(BASE_URL + a['href'])
+            urls  = [
+                BASE_URL + c.select_one('a.hero')['href']
+                for c in cards
+                if c.select_one('a.hero') and c.select_one('a.hero').get('href')
+            ]
             if urls:
                 return urls
 
-        print(f"  Attempt {attempt}/{LIST_PAGE_RETRIES}: no cards rendered, retrying...")
-        time.sleep(5 * attempt)  # progressive backoff: 5s, 10s, 15s
+        wait_secs = 5 * attempt
+        print(f"  [{_fmt_time()}] Attempt {attempt}/{LIST_PAGE_RETRIES}: "
+              f"no cards rendered — retrying in {wait_secs}s...")
+        time.sleep(wait_secs)
 
     return []
 
@@ -297,14 +361,14 @@ def _get_listing_urls(driver, page):
 def _load_master(master_path):
     if not os.path.exists(master_path):
         return pd.DataFrame(columns=COLUMN_ORDER), set()
-    df = pd.read_csv(master_path)
+    df   = pd.read_csv(master_path)
     seen = set(df['auction_id'].dropna().astype(str)) if 'auction_id' in df.columns else set()
     return df, seen
 
 
 def _save_master(df, master_path):
-    """Atomic write: temp file then rename."""
-    df = df.reindex(columns=COLUMN_ORDER)
+    """Atomic write: write to .tmp then rename — crash-safe."""
+    df  = df.reindex(columns=COLUMN_ORDER)
     tmp = master_path + '.tmp'
     df.to_csv(tmp, index=False)
     os.replace(tmp, master_path)
@@ -315,33 +379,51 @@ def _save_master(df, master_path):
 # ---------------------------------------------------------------------------
 
 def scrape_pages(
-    start_page=1,
-    end_page=1,
-    master_path="master_data.csv",
-    excel_path=None,
-    skip_existing=True,
+    start_page    = None,
+    end_page      = None,
+    master_path   = "master_data.csv",
+    excel_path    = None,
+    skip_existing = True,
+    lookback      = LOOKBACK_PAGES,
+    progress_path = PROGRESS_FILE,
 ):
     """
-    Scrape pages [start_page..end_page] of past auctions.
+    Scrape past-auction pages and append new rows to master_data.csv.
 
     Parameters
     ----------
-    start_page    : int   First page to scrape (inclusive).
-    end_page      : int   Last page to scrape (inclusive).
-    master_path   : str   Persistent CSV. Created if missing.
-    excel_path    : str   If provided, also export master as .xlsx after the run.
-    skip_existing : bool  Skip URLs whose auction_id is already in master.
+    start_page    : int | None  First page (inclusive). None = auto from checkpoint.
+    end_page      : int | None  Last page (inclusive).  None = run until empty page.
+    master_path   : str         Persistent CSV — created if missing.
+    excel_path    : str | None  Also export master as .xlsx after the run.
+    skip_existing : bool        Skip auction_ids already in master.
+    lookback      : int         Pages to rewind from checkpoint when auto-resuming.
+    progress_path : str         Path to the JSON checkpoint file.
     """
-    master_df, seen_ids = _load_master(master_path)
-    print(f"Master: {len(master_df)} existing rows ({len(seen_ids)} unique IDs)")
-    print(f"Pages:  {start_page} -> {end_page}\n")
+    if start_page is None:
+        start_page = get_resume_page(lookback, progress_path)
 
-    driver = _make_driver()
+    master_df, seen_ids = _load_master(master_path)
+    run_start = _now_mst()
+
+    print(f"Run started:  {_fmt_time(run_start)}")
+    print(f"Master:       {len(master_df)} existing rows ({len(seen_ids)} unique IDs)")
+    end_label = str(end_page) if end_page is not None else "until empty page"
+    print(f"Pages:        {start_page} -> {end_label}\n")
+
+    driver   = _make_driver()
     new_rows = []
+    page_range = (
+        range(start_page, end_page + 1)
+        if end_page is not None
+        else _infinite_range(start_page)
+    )
 
     try:
-        for page in range(start_page, end_page + 1):
-            print(f"=== PAGE {page} ===")
+        for page in page_range:
+            page_start = _now_mst()
+            print(f"=== PAGE {page} | {_fmt_time(page_start)} ===")
+
             urls = _get_listing_urls(driver, page)
             print(f"  Cards found: {len(urls)}")
 
@@ -362,30 +444,42 @@ def scrape_pages(
                     seen_ids.add(row['auction_id'])
                     print(f"    -> {row.get('title')} | {row.get('status')} | ${row.get('bid_amount')}")
                 except Exception as e:
-                    print(f"    ERROR: {e}")
+                    print(f"    ERROR at {_fmt_time()}: {e}")
                     new_rows.append({
                         'auction_id': _auction_id_from_url(url),
-                        'url': url,
-                        'scraped_at': datetime.now().isoformat(timespec='seconds'),
+                        'url':        url,
+                        'scraped_at': _now_mst().isoformat(timespec='seconds'),
                     })
 
                 time.sleep(REQUEST_DELAY)
 
-            # Save after every page so a mid-run crash doesn't lose progress
+            # Save master + checkpoint after every page
             if new_rows:
                 merged = pd.concat([master_df, pd.DataFrame(new_rows)], ignore_index=True)
                 _save_master(merged, master_path)
-                print(f"  Saved checkpoint -> {master_path} ({len(merged)} rows)\n")
+                master_df = merged
+
+            _save_progress(page, progress_path)
+
+            print(f"  Page {page} done | {_fmt_time()} | elapsed: {_elapsed(page_start)} "
+                  f"| master total: {len(master_df)} rows\n")
 
     finally:
         driver.quit()
-
-    # Final reload + return
-    master_df, _ = _load_master(master_path)
 
     if excel_path:
         master_df.to_excel(excel_path, index=False)
         print(f"Excel snapshot -> {excel_path}")
 
-    print(f"\nDone. Master file: {master_path} ({len(master_df)} total rows, {len(new_rows)} added this run)")
+    print(f"\nRun finished: {_fmt_time()}")
+    print(f"Total elapsed: {_elapsed(run_start)}")
+    print(f"Added this run: {len(new_rows)} rows | Master total: {len(master_df)} rows")
     return master_df
+
+
+def _infinite_range(start):
+    """Generator that counts up from start indefinitely."""
+    n = start
+    while True:
+        yield n
+        n += 1
