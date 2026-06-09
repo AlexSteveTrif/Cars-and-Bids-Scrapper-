@@ -412,7 +412,7 @@ def scrape_pages(
     print(f"Pages:        {start_page} -> {end_label}\n")
 
     driver   = _make_driver()
-    new_rows = []
+    total_added = 0
     page_range = (
         range(start_page, end_page + 1)
         if end_page is not None
@@ -436,16 +436,21 @@ def scrape_pages(
                 print(f"  New (not in master): {len(fresh)} / {len(urls)}")
                 urls = fresh
 
+            # Per-page buffer — must be reset each page. Rows already merged
+            # into master_df below must NOT be carried over and re-appended on
+            # the next page (that was the duplication bug).
+            page_rows = []
+
             for i, url in enumerate(urls, 1):
                 try:
                     print(f"  [{i}/{len(urls)}] {url}")
                     row = _extract_listing(driver, url)
-                    new_rows.append(row)
+                    page_rows.append(row)
                     seen_ids.add(row['auction_id'])
                     print(f"    -> {row.get('title')} | {row.get('status')} | ${row.get('bid_amount')}")
                 except Exception as e:
                     print(f"    ERROR at {_fmt_time()}: {e}")
-                    new_rows.append({
+                    page_rows.append({
                         'auction_id': _auction_id_from_url(url),
                         'url':        url,
                         'scraped_at': _now_mst().isoformat(timespec='seconds'),
@@ -453,11 +458,12 @@ def scrape_pages(
 
                 time.sleep(REQUEST_DELAY)
 
-            # Save master + checkpoint after every page
-            if new_rows:
-                merged = pd.concat([master_df, pd.DataFrame(new_rows)], ignore_index=True)
-                _save_master(merged, master_path)
-                master_df = merged
+            # Append only THIS page's rows to master, then save + checkpoint.
+            if page_rows:
+                master_df = pd.concat([master_df, pd.DataFrame(page_rows)],
+                                      ignore_index=True)
+                _save_master(master_df, master_path)
+                total_added += len(page_rows)
 
             _save_progress(page, progress_path)
 
@@ -473,7 +479,7 @@ def scrape_pages(
 
     print(f"\nRun finished: {_fmt_time()}")
     print(f"Total elapsed: {_elapsed(run_start)}")
-    print(f"Added this run: {len(new_rows)} rows | Master total: {len(master_df)} rows")
+    print(f"Added this run: {total_added} rows | Master total: {len(master_df)} rows")
     return master_df
 
 
