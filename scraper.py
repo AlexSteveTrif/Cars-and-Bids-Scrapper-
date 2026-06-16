@@ -39,7 +39,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 
 BASE_URL          = "https://carsandbids.com"
-CHROME_VERSION    = 147
+CHROME_VERSION    = None   # None = auto-detect installed Chrome; set an int to pin
 REQUEST_DELAY     = 4
 LIST_PAGE_TIMEOUT = 300
 DETAIL_PAGE_TIMEOUT = 300
@@ -127,11 +127,55 @@ def get_resume_page(lookback=LOOKBACK_PAGES, progress_path=PROGRESS_FILE):
 # Driver
 # ---------------------------------------------------------------------------
 
+def _detect_chrome_major():
+    """
+    Best-effort detection of the locally installed Chrome major version, so the
+    matching ChromeDriver is downloaded. Returns an int, or None to let
+    undetected_chromedriver fall back to its own auto-detection.
+
+    Chrome silently auto-updates, so pinning a fixed version (the old behaviour)
+    breaks the scraper after every browser update with a SessionNotCreated
+    "only supports Chrome version N" error. Detecting it at runtime avoids that.
+    """
+    # Windows: the installed version is recorded in the registry.
+    try:
+        import winreg
+        for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+            try:
+                with winreg.OpenKey(hive, r"Software\Google\Chrome\BLBeacon") as key:
+                    version, _ = winreg.QueryValueEx(key, "version")
+                    return int(version.split(".")[0])
+            except OSError:
+                continue
+    except Exception:
+        pass
+    # Fallback: read the chrome.exe product version directly.
+    try:
+        import subprocess
+        for path in (
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        ):
+            if os.path.exists(path):
+                out = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command",
+                     f"(Get-Item '{path}').VersionInfo.ProductVersion"],
+                    capture_output=True, text=True, timeout=10,
+                ).stdout.strip()
+                if out:
+                    return int(out.split(".")[0])
+    except Exception:
+        pass
+    return None
+
+
 def _make_driver():
     options = uc.ChromeOptions()
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
-    return uc.Chrome(options=options, headless=False, version_main=CHROME_VERSION)
+    version_main = CHROME_VERSION or _detect_chrome_major()
+    print(f"Launching Chrome (driver version_main={version_main})")
+    return uc.Chrome(options=options, headless=False, version_main=version_main)
 
 
 def _scroll_to_load_all(driver, pause=1.5):
