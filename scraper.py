@@ -41,6 +41,13 @@ from selenium.common.exceptions import TimeoutException
 BASE_URL          = "https://carsandbids.com"
 CHROME_VERSION    = None   # None = auto-detect installed Chrome; set an int to pin
 REQUEST_DELAY     = 4
+
+# Selector for the listing cards on /past-auctions/. Cars & Bids periodically
+# renames its wrapper classes; if the scraper suddenly stops opening auctions,
+# this is the first thing to re-check against the live DOM. As of Aug 2026 the
+# grid is <ul.cnb-auctions-grid> (was ul.auctions-list) and each card's link is
+# a bare <a href="/auctions/..."> (was a.hero).
+CARD_SELECTOR     = "ul.cnb-auctions-grid li.auction-item"
 LIST_PAGE_TIMEOUT = 300
 DETAIL_PAGE_TIMEOUT = 300
 LIST_PAGE_RETRIES = 30
@@ -376,17 +383,17 @@ def _get_listing_urls(driver, page):
     """
     for attempt in range(1, LIST_PAGE_RETRIES + 1):
         driver.get(f"{BASE_URL}/past-auctions/?page={page}")
-        appeared = _wait_for(driver, 'ul.auctions-list li.auction-item', LIST_PAGE_TIMEOUT)
+        appeared = _wait_for(driver, CARD_SELECTOR, LIST_PAGE_TIMEOUT)
 
         if appeared:
             _scroll_to_load_all(driver)
             soup  = BeautifulSoup(driver.page_source, 'lxml')
-            cards = soup.select('ul.auctions-list li.auction-item')
-            urls  = [
-                BASE_URL + c.select_one('a.hero')['href']
-                for c in cards
-                if c.select_one('a.hero') and c.select_one('a.hero').get('href')
-            ]
+            cards = soup.select(CARD_SELECTOR)
+            urls  = []
+            for c in cards:
+                link = c.select_one('a[href*="/auctions/"]')
+                if link and link.get('href'):
+                    urls.append(BASE_URL + link['href'])
             if urls:
                 return urls
 
