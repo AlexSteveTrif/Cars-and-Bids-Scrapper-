@@ -16,7 +16,7 @@ For each listing, one row in `master_data.csv` with these fields:
 
 **Seller**
 
-`seller_name` and `seller_type`. Seller type is a Dealer/Private label.
+`seller_name` and `seller_type`. Seller type is a Dealer/Private label, read directly from the listing's "Seller Type" field.
 
 **Auction**
 
@@ -82,7 +82,7 @@ A few things took longer than they should have. Writing them down here in case a
 
 Things I'd want to fix if I keep building on this:
 
-- Seller type detection is a heuristic that looks for "dealer" text in the seller block. Most listings don't expose an explicit type label, so private sellers default to Private. If anyone has a more reliable approach, I'm open to suggestions.
+- Seller type now comes from the explicit "Seller Type" quick-fact the listing exposes (`Private Party` → `Private`, `Dealer` → `Dealer`), which is far more reliable than the old text heuristic. The heuristic is kept only as a fallback if that field is ever missing.
 - `CHROME_VERSION` is hardcoded. Should auto-detect from the registry on Windows.
 - No retry on individual listing failures. If a page times out, the row gets written with just the URL and ID and you have to re-run that listing manually.
 - Only handles the past-auctions section. Doesn't touch active auctions, which would need a different parser since the bid/status fields are live.
