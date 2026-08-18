@@ -252,6 +252,24 @@ def _clean_number(text):
             return None
 
 
+def _normalize_seller_type(text):
+    """
+    Map the site's 'Seller Type' quick-fact onto the Dealer/Private schema used
+    throughout the existing master file. Cars & Bids labels private sellers
+    'Private Party' and dealers 'Dealer'; substring matching keeps this robust
+    to minor wording changes (e.g. 'Licensed Dealer'). Returns None on empty
+    input so callers can fall back to the legacy text heuristic.
+    """
+    if not text:
+        return None
+    t = text.strip().lower()
+    if 'dealer' in t:
+        return 'Dealer'
+    if 'private' in t:
+        return 'Private'
+    return text.strip()
+
+
 # ---------------------------------------------------------------------------
 # Page extractors
 # ---------------------------------------------------------------------------
@@ -363,7 +381,9 @@ def _extract_listing(driver, url):
         'state':          state,
         'postal_code':    postal_code,
         'seller_name':    stats.get('seller_name'),
-        'seller_type':    stats.get('seller_type'),
+        # Prefer the explicit 'Seller Type' quick-fact the site now exposes;
+        # fall back to the legacy dealer-text heuristic if it's ever missing.
+        'seller_type':    _normalize_seller_type(specs.get('Seller Type')) or stats.get('seller_type'),
         'reserve':        stats.get('reserve'),
         'status':         _extract_status(soup),
         'bid_amount':     _clean_number(stats.get('bid_amount')),
